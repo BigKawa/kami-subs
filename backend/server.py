@@ -23,7 +23,9 @@ import os
 import re
 import sys
 import time
-from contextlib import asynccontextmanager
+import threading
+from collections import deque
+from contextlib import asynccontextmanager, aclosing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,7 +102,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from config import (
     MODEL_SIZE, DEVICE, COMPUTE_TYPE, TRANSLATOR, NLLB_MODEL,
     HOST, PORT, SAMPLE_RATE, VAD_FILTER, MAX_CHUNK_LAG_S,
-    SENTENCE_MAX_CHARS,
+    SENTENCE_MAX_CHARS, SENTENCE_MAX_CHUNKS,
 )
 
 log = logging.getLogger("kami-subs")
@@ -209,6 +211,9 @@ _NLLB_LANG = {
     "hi": "hin_Deva", "fa": "pes_Arab", "ur": "urd_Arab", "nl": "nld_Latn",
 }
 
+_nllb_lock = threading.RLock()
+
+
 _nllb = None              # (translator, tokenizer) once loaded
 _nllb_failed = False      # set True after a load failure so we stop retrying
 
@@ -254,6 +259,12 @@ def _get_nllb():
 
 
 def _translate_nllb(text: str, src: str, tgt: str) -> str:
+    # Both lazy conversion and the mutable tokenizer must be serialized.
+    with _nllb_lock:
+        return _translate_nllb_locked(text, src, tgt)
+
+
+def _translate_nllb_locked(text: str, src: str, tgt: str) -> str:
     bundle = _get_nllb()
     if bundle is None:
         return _translate_google(text, src, tgt)
@@ -269,7 +280,9 @@ def _translate_nllb(text: str, src: str, tgt: str) -> str:
         tokenizer.src_lang = src_code
     tokens = tokenizer.convert_ids_to_tokens(tokenizer.encode(text))
     results = translator.translate_batch(
-        [tokens], target_prefix=[[tgt_code]], beam_size=1, max_decoding_length=256,
+        [tokens], target_prefix=[[tgt_code]], beam_size=1,
+        no_repeat_ngram_size=3,
+        max_decoding_length=min(128, max(32, len(tokens) * 3)),
     )
     out_tokens = results[0].hypotheses[0]
     if out_tokens and out_tokens[0] == tgt_code:
@@ -313,6 +326,11 @@ class Session:
     # gap until then). No stacking of multiple sentences.
     pending: str = ""
     last_detected: str = "auto"
+    pending_chunks: int = 0
+
+    def clear_pending(self):
+        self.pending = ""
+        self.pending_chunks = 0
 
 
 # Sentence-final marks across the languages we caption — Latin, Arabic (؟ ،),
@@ -393,7 +411,7 @@ async def commit_pending(ws: WebSocket, session: Session, loop) -> None:
     partial = await _render(session, loop)
     log.info("commit #%d raw=%r out=%r", session.chunk_id, session.pending, partial)
     await _send_line(ws, session, partial, is_final=True)
-    session.pending = ""
+    session.clear_pending()
 
 
 async def _handle_chunk(
@@ -406,10 +424,12 @@ async def _handle_chunk(
     # Backlog drop. If processing has slipped behind real-time, this chunk
     # is already stale by the time we get to it. Subs from 15s ago are
     # worse UX than no subs at all — drop and let the next (fresher) chunk
-    # catch us up. Flush whatever's buffered so we don't lose it.
-    lag = time.monotonic() - arrived_at
+    # catch us up. Discard the sentence buffer across this gap.
+    started = time.monotonic()
+    lag = started - arrived_at
     if lag > MAX_CHUNK_LAG_S:
-        # Behind real-time: skip this chunk and keep the current line on screen.
+        session.clear_pending()
+        # Do not concatenate speech across missing audio.
         log.info("chunk #%d: dropped (lag=%.2fs > %.1fs)", cid, lag, MAX_CHUNK_LAG_S)
         return
 
@@ -434,10 +454,13 @@ async def _handle_chunk(
         await commit_pending(ws, session, loop)
         return
 
+    asr_started = time.monotonic()
     raw, detected = await loop.run_in_executor(None, transcribe_chunk, session, pcm)
+    asr_s = time.monotonic() - asr_started
     if not raw:
         log.info("chunk #%d: empty transcript (lang=%s) rms=%.4f peak=%.3f",
                  cid, detected, rms, peak)
+        await commit_pending(ws, session, loop)
         return
 
     # Drop whole-chunk fansub-credit hallucinations BEFORE buffering them.
@@ -450,19 +473,75 @@ async def _handle_chunk(
 
     # Append this chunk to the sentence being spoken, re-translate the WHOLE
     # sentence (full-clause context — the fix for "translation is off"), and
-    # show it growing in real time. The translator always sees a complete
-    # phrase, never a 1s shard, but the user still gets an update every chunk.
+    # show it growing in real time. Bound the buffer even without punctuation;
+    # short chunks may still contain incomplete words or clauses.
     session.last_detected = detected
-    session.pending = (session.pending + " " + raw).strip() if session.pending else raw
+    separator = "" if detected in ("ja", "zh") else " "
+    session.pending = session.pending + separator + raw if session.pending else raw
+    session.pending_chunks += 1
 
+    is_final = (ends_sentence(session.pending)
+                or len(session.pending) >= SENTENCE_MAX_CHARS
+                or session.pending_chunks >= max(1, SENTENCE_MAX_CHUNKS))
+    translate_started = time.monotonic()
     partial = await _render(session, loop)
-    await _send_line(ws, session, partial, is_final=False)
+    translate_s = time.monotonic() - translate_started
+    await _send_line(ws, session, partial, is_final=is_final)
     log.info("chunk #%d: pending=%r out=%r", cid, session.pending, partial)
+    log.info("timing #%d: queue=%.3fs whisper=%.3fs translate=%.3fs total=%.3fs",
+             cid, lag, asr_s, translate_s, time.monotonic() - started)
+    if is_final:
+        session.clear_pending()
 
-    # When the sentence completes (punctuation) or grows long, clear the buffer
-    # so the next sentence starts a fresh line and replaces this one on screen.
-    if ends_sentence(session.pending) or len(session.pending) >= SENTENCE_MAX_CHARS:
-        session.pending = ""
+
+async def _incoming_messages(ws):
+    """Receive while inference runs; keep at most three waiting audio chunks.
+
+    Config messages retain their order. Dropped audio marks a discontinuity so
+    the consumer clears its sentence buffer before continuing with fresh audio.
+    """
+    pending = deque()
+    ready = asyncio.Event()
+    dropped = False
+
+    async def receive():
+        nonlocal dropped
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    pending.clear()
+                    pending.append((msg, time.monotonic()))
+                    ready.set()
+                    return
+                pending.append((msg, time.monotonic()))
+                if sum(bool(m.get("bytes")) for m, _ in pending) > 3:
+                    old = next(item for item in pending if item[0].get("bytes"))
+                    pending.remove(old)
+                    dropped = True
+                ready.set()
+        except Exception as exc:
+            pending.clear()
+            pending.append((exc, time.monotonic()))
+            ready.set()
+
+    reader = asyncio.create_task(receive())
+    try:
+        while True:
+            await ready.wait()
+            msg, arrived_at = pending.popleft()
+            if not pending:
+                ready.clear()
+            if isinstance(msg, Exception):
+                raise msg
+            gap = dropped
+            dropped = False
+            yield msg, arrived_at, gap
+            if msg.get("type") == "websocket.disconnect":
+                return
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
 
 
 # ----- websocket loop -------------------------------------------------------
@@ -490,43 +569,44 @@ async def handle_socket(ws: WebSocket):
 
         # Main loop: receive binary PCM chunks, transcribe, translate, push back.
         loop = asyncio.get_running_loop()
-        while True:
-            msg = await ws.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
+        async with aclosing(_incoming_messages(ws)) as messages:
+            async for msg, arrived_at, gap in messages:
+                if gap:
+                    session.clear_pending()
+                    log.info("audio backlog: discarded old chunks; resuming recent audio")
+                if msg.get("type") == "websocket.disconnect":
+                    break
 
-            if "bytes" in msg and msg["bytes"]:
-                # Stamp arrival time NOW so the chunk handler can detect
-                # backlog. If we stamped inside _handle_chunk, the time would
-                # already include the previous chunk's processing wait.
-                arrived_at = time.monotonic()
-                # Process each chunk in its own try block — a single bad
-                # chunk (translator throw, whisper edge case, etc) used to
-                # kill the entire WS session. Now we just log and continue.
-                try:
-                    await _handle_chunk(ws, session, loop, msg["bytes"], arrived_at)
-                except Exception as e:
-                    log.exception("chunk handler error: %s", e)
+                if "bytes" in msg and msg["bytes"]:
+                    # Process each chunk in its own try block — a single bad
+                    # chunk (translator throw, whisper edge case, etc) used to
+                    # kill the entire WS session. Now we just log and continue.
                     try:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "message": f"chunk processing failed: {e}",
-                        }))
-                    except Exception:
+                        await _handle_chunk(ws, session, loop, msg["bytes"], arrived_at)
+                    except WebSocketDisconnect:
+                        break
+                    except Exception as e:
+                        log.exception("chunk handler error: %s", e)
+                        try:
+                            await ws.send_text(json.dumps({
+                                "type": "error",
+                                "message": f"chunk processing failed: {e}",
+                            }))
+                        except Exception:
+                            pass
+                        # Don't break — let the session keep running for the next chunk.
+
+                elif "text" in msg and msg["text"]:
+                    # Allow runtime reconfig.
+                    try:
+                        cfg = json.loads(msg["text"])
+                        if cfg.get("type") == "config":
+                            session.clear_pending()
+                            session.source_lang = cfg.get("sourceLang", session.source_lang)
+                            session.target_lang = cfg.get("targetLang", session.target_lang)
+                            session.task = cfg.get("task", session.task)
+                    except json.JSONDecodeError:
                         pass
-                    # Don't break — let the session keep running for the next chunk.
-
-            elif "text" in msg and msg["text"]:
-                # Allow runtime reconfig.
-                try:
-                    cfg = json.loads(msg["text"])
-                    if cfg.get("type") == "config":
-                        session.source_lang = cfg.get("sourceLang", session.source_lang)
-                        session.target_lang = cfg.get("targetLang", session.target_lang)
-                        session.task = cfg.get("task", session.task)
-                except json.JSONDecodeError:
-                    pass
-
     except WebSocketDisconnect:
         pass
     except Exception as e:
