@@ -97,6 +97,7 @@ def _register_nvidia_dll_dirs() -> None:
 _register_nvidia_dll_dirs()
 
 import numpy as np
+from audio_buffer import SpeechBuffer
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from config import (
@@ -280,7 +281,8 @@ def _translate_nllb_locked(text: str, src: str, tgt: str) -> str:
         tokenizer.src_lang = src_code
     tokens = tokenizer.convert_ids_to_tokens(tokenizer.encode(text))
     results = translator.translate_batch(
-        [tokens], target_prefix=[[tgt_code]], beam_size=1,
+        # Four hypotheses improved meaning in the fixed Japanese text audit.
+        [tokens], target_prefix=[[tgt_code]], beam_size=4,
         no_repeat_ngram_size=3,
         max_decoding_length=min(128, max(32, len(tokens) * 3)),
     )
@@ -318,6 +320,7 @@ class Session:
     target_lang: str = "ar"
     task: str = "transcribe"
     chunk_id: int = 0
+    pause_aware: bool = False
     # Live-caption display model: one line at a time, like normal subtitles.
     # `pending` is the sentence currently being spoken (source text). It's
     # re-translated and shown in full every chunk so the line grows readably;
@@ -483,7 +486,7 @@ async def _handle_chunk(
     session.pending = session.pending + separator + raw if session.pending else raw
     session.pending_chunks += 1
 
-    is_final = (ends_sentence(session.pending)
+    is_final = (session.pause_aware or ends_sentence(session.pending)
                 or len(session.pending) >= SENTENCE_MAX_CHARS
                 or session.pending_chunks >= max(1, SENTENCE_MAX_CHUNKS))
     translate_started = time.monotonic()
@@ -495,6 +498,25 @@ async def _handle_chunk(
              cid, lag, asr_s, translate_s, time.monotonic() - started)
     if is_final:
         session.clear_pending()
+
+
+async def _process_audio_packet(ws, session, loop, raw_bytes, arrived_at, buffer):
+    if not session.pause_aware:
+        await _handle_chunk(ws, session, loop, raw_bytes, arrived_at)
+        return
+    lag = time.monotonic() - arrived_at
+    if lag > MAX_CHUNK_LAG_S:
+        buffer.reset()
+        session.clear_pending()
+        log.info("audio packet dropped before buffering (lag=%.2fs)", lag)
+        return
+    started = time.monotonic()
+    sections = await loop.run_in_executor(None, buffer.feed, raw_bytes)
+    vad_s = time.monotonic() - started
+    for audio, reason in sections:
+        log.info("speech section: duration=%.2fs boundary=%s vad=%.3fs",
+                 len(audio) / (2 * SAMPLE_RATE), reason, vad_s)
+        await _handle_chunk(ws, session, loop, audio, arrived_at)
 
 
 async def _incoming_messages(ws):
@@ -551,6 +573,7 @@ async def _incoming_messages(ws):
 async def handle_socket(ws: WebSocket):
     await ws.accept()
     session = Session()
+    speech_buffer = SpeechBuffer()
     log.info("client connected")
 
     try:
@@ -564,6 +587,10 @@ async def handle_socket(ws: WebSocket):
                     session.source_lang = cfg.get("sourceLang", "auto") or "auto"
                     session.target_lang = cfg.get("targetLang", "ar") or "ar"
                     session.task = cfg.get("task", "transcribe") or "transcribe"
+                    session.pause_aware = cfg.get("chunkMode") == "speech"
+                    if session.pause_aware and session.sample_rate != SAMPLE_RATE:
+                        raise ValueError("Speech buffering requires 16000 Hz PCM")
+                    log.info("audio mode: %s", "speech pauses / max 5s" if session.pause_aware else "fixed chunks")
                     log.info("config: rate=%s src=%s tgt=%s task=%s",
                              session.sample_rate, session.source_lang,
                              session.target_lang, session.task)
@@ -575,6 +602,7 @@ async def handle_socket(ws: WebSocket):
         async with aclosing(_incoming_messages(ws)) as messages:
             async for msg, arrived_at, gap in messages:
                 if gap:
+                    speech_buffer.reset()
                     session.clear_pending()
                     log.info("audio backlog: discarded old chunks; resuming recent audio")
                 if msg.get("type") == "websocket.disconnect":
@@ -585,10 +613,12 @@ async def handle_socket(ws: WebSocket):
                     # chunk (translator throw, whisper edge case, etc) used to
                     # kill the entire WS session. Now we just log and continue.
                     try:
-                        await _handle_chunk(ws, session, loop, msg["bytes"], arrived_at)
+                        await _process_audio_packet(ws, session, loop, msg["bytes"], arrived_at, speech_buffer)
                     except WebSocketDisconnect:
                         break
                     except Exception as e:
+                        speech_buffer.reset()
+                        session.clear_pending()
                         log.exception("chunk handler error: %s", e)
                         try:
                             await ws.send_text(json.dumps({
@@ -604,6 +634,7 @@ async def handle_socket(ws: WebSocket):
                     try:
                         cfg = json.loads(msg["text"])
                         if cfg.get("type") == "config":
+                            speech_buffer.reset()
                             session.clear_pending()
                             session.source_lang = cfg.get("sourceLang", session.source_lang)
                             session.target_lang = cfg.get("targetLang", session.target_lang)

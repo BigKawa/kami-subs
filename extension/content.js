@@ -6,7 +6,8 @@ const MAX_VISIBLE_CHARS = 180;
 // Clear the overlay this long after the last transcript update. While someone's
 // talking, updates land ~every second and keep resetting this timer, so the
 // line stays put; it only fades once speech actually stops for a few seconds.
-const CLEAR_AFTER_MS = 4000;
+// Allow a full 5s speech section plus processing before fading the last line.
+const CLEAR_AFTER_MS = 6500;
 
 let overlayEl = null;
 let textEl = null;

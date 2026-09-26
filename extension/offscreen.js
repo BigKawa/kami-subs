@@ -1,6 +1,6 @@
 // Kami Subs — offscreen document
 // Captures tab audio via the streamId provided by background.js,
-// chunks it into ~3s windows, sends as 16kHz mono PCM over WebSocket to the backend,
+// sends 0.5s packets of 16kHz mono PCM; the backend groups them at speech pauses,
 // forwards transcripts back to background.js -> content overlay.
 
 let mediaStream = null;
@@ -15,12 +15,10 @@ let reconnectAttempts = 0;
 let reconnectTimer = null;
 const MAX_RECONNECT_DELAY_MS = 5000;
 
-// We buffer 16kHz mono Float32 samples until we hit CHUNK_SECONDS, then emit a chunk.
-// Give Whisper more acoustic context; joining text later cannot recover
-// words cut by 1s boundaries. This adds up to 3s capture latency.
-// Boundaries are still fixed windows, not guaranteed sentence boundaries.
+// Transport packets are short; these are NOT individual Whisper calls.
+// The backend's Silero VAD groups speech until a 0.5s pause or a 5s limit.
 const TARGET_SAMPLE_RATE = 16000;
-const CHUNK_SECONDS = 3.0;
+const CHUNK_SECONDS = 0.5;
 const CHUNK_SAMPLES = TARGET_SAMPLE_RATE * CHUNK_SECONDS;
 let chunkBuffer = new Float32Array(0);
 
@@ -77,9 +75,11 @@ function openSocket() {
 
   ws.addEventListener('open', () => {
     reconnectAttempts = 0;
+    chunkBuffer = new Float32Array(0); // discard audio from before reconnect
     ws.send(JSON.stringify({
       type: 'config',
       sampleRate: TARGET_SAMPLE_RATE,
+      chunkMode: 'speech',
       sourceLang: (settings && settings.sourceLang) || 'auto',
       targetLang: (settings && settings.targetLang) || 'ar',
       task: (settings && settings.task) || 'translate'
