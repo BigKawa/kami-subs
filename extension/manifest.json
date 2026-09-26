@@ -20,12 +20,7 @@
   },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Kami Subs",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
+    "default_title": "Kami Subs"
   },
   "content_scripts": [
     {
@@ -35,12 +30,8 @@
       "run_at": "document_idle",
       "all_frames": false
     }
-  ],
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  },
+  ]
+,
   "web_accessible_resources": [
     {
       "resources": ["offscreen.html"],

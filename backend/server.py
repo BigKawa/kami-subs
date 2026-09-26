@@ -334,7 +334,10 @@ def transcribe_chunk(session: Session, pcm_int16: np.ndarray) -> tuple[str, str]
     segments, info = model.transcribe(
         audio,
         language=lang,
-        task=session.task if session.task in ("transcribe", "translate") else "transcribe",
+        # External translators need source-language text, including for English.
+        # Whisper turbo does not support speech translation.
+        task=("transcribe" if TRANSLATOR in ("google", "nllb") else
+              session.task if session.task in ("transcribe", "translate") else "transcribe"),
         vad_filter=VAD_FILTER,
         beam_size=1,                   # fast; bump to 5 for quality
         # initial_prompt is intentionally OMITTED. It primes whisper with the
@@ -362,7 +365,8 @@ async def _render(session: Session, loop) -> str:
     if not session.pending:
         return ""
     src = session.last_detected if session.source_lang == "auto" else session.source_lang
-    if session.task == "translate" and session.target_lang == "en":
+    if (TRANSLATOR not in ("google", "nllb")
+            and session.task == "translate" and session.target_lang == "en"):
         return session.pending   # whisper already produced English
     return await loop.run_in_executor(
         None, translate, session.pending, src, session.target_lang
