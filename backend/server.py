@@ -477,6 +477,9 @@ async def _handle_chunk(
     # short chunks may still contain incomplete words or clauses.
     session.last_detected = detected
     separator = "" if detected in ("ja", "zh") else " "
+    # Separate numeric fragments: "45" + "5分" must not become "455分".
+    if session.pending and session.pending[-1].isdecimal() and raw[0].isdecimal():
+        separator = " "
     session.pending = session.pending + separator + raw if session.pending else raw
     session.pending_chunks += 1
 
@@ -626,6 +629,14 @@ async def lifespan(_app: FastAPI):
         get_model()
     except Exception as e:
         log.warning("model warmup failed: %s", e)
+    if TRANSLATOR == "nllb":
+        # Finish lazy loading before accepting audio; otherwise the first
+        # translation blocks for seconds and causes initial audio to be dropped.
+        def warm_translation():
+            with _nllb_lock:
+                _get_nllb()
+        log.info("warming NLLB before accepting audio...")
+        await asyncio.get_running_loop().run_in_executor(None, warm_translation)
     yield
 
 

@@ -80,5 +80,22 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         await messages.aclose()
         self.assertTrue(cancelled.is_set())
 
+    async def test_numeric_fragments_do_not_merge(self):
+        session = server.Session(source_lang='ja', target_lang='en', pending='映画って45', pending_chunks=1)
+        ws = SimpleNamespace(send_text=AsyncMock())
+        with patch.object(server, 'transcribe_chunk', return_value=('5分以上', 'ja')), patch.object(server, 'translate', return_value='test'):
+            await server._handle_chunk(ws, session, asyncio.get_running_loop(), np.full(48000, 2000, dtype=np.int16).tobytes(), server.time.monotonic())
+        self.assertEqual(json.loads(ws.send_text.call_args.args[0])['raw'], '映画って45 5分以上')
+
+    async def test_nllb_loaded_before_startup_completes(self):
+        with patch.object(server, 'TRANSLATOR', 'nllb'), patch.object(server, 'get_model'), patch.object(server, '_get_nllb') as load:
+            async with server.lifespan(server.app):
+                load.assert_called_once()
+
+    async def test_google_startup_does_not_load_nllb(self):
+        with patch.object(server, 'TRANSLATOR', 'google'), patch.object(server, 'get_model'), patch.object(server, '_get_nllb') as load:
+            async with server.lifespan(server.app):
+                load.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()
