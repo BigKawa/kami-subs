@@ -461,8 +461,10 @@ async def _handle_chunk(
     # initial_prompt context — exactly what causes "the last word spams
     # when the video pauses." Skip transcribe for sub-threshold chunks and
     # send empty text so the overlay clears.
-    SILENCE_RMS = 0.005   # voice/music typically > 0.05
-    if rms < SILENCE_RMS:
+    # Speech-mode sections have already passed Silero VAD. Allow quieter
+    # speech there; retain the original gate for unclassified fixed chunks.
+    silence_rms = 0.001 if session.pause_aware else 0.005
+    if rms < silence_rms:
         log.info("chunk #%d: silence skip (rms=%.4f peak=%.3f)", cid, rms, peak)
         # A pause ends the current utterance: finalize whatever's building so it
         # shows in full, then the overlay clears itself after CLEAR_AFTER_MS of
