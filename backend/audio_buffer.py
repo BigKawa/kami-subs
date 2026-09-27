@@ -3,7 +3,8 @@ import numpy as np
 
 SAMPLE_RATE = 16000
 PAUSE_SAMPLES = 8000       # 500 ms without detected speech
-PAD_SAMPLES = 1600         # retain 100 ms after speech
+PRE_ROLL_SAMPLES = 4000    # retain up to 250 ms before detected speech
+PAD_SAMPLES = 2400         # retain 150 ms after speech
 MAX_SAMPLES = 80000        # at most 5 seconds per recognition call
 
 
@@ -27,7 +28,7 @@ class SpeechBuffer:
     def feed(self, raw_bytes):
         """Return (PCM bytes, boundary reason) pairs. No output for non-speech.
 
-        Retain a half-second lead-in while idle so speech onsets are not lost.
+        Keep a half-second history while idle; emit up to 250 ms before speech.
         Each call belongs to one session and must run serially.
         """
         self.pcm = np.concatenate((self.pcm, np.frombuffer(raw_bytes, dtype=np.int16)))
@@ -50,6 +51,9 @@ class SpeechBuffer:
                 reason = 'limit'
             else:
                 break
-            result.append((self.pcm[:cut].tobytes(), reason))
+            # Use real captured context, clamped to the available history.
+            # Consume through cut so adjacent sections never duplicate audio.
+            start = max(0, spans[0]['start'] - PRE_ROLL_SAMPLES)
+            result.append((self.pcm[start:cut].tobytes(), reason))
             self.pcm = self.pcm[cut:].copy()
         return result

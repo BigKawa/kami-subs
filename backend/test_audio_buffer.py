@@ -28,7 +28,7 @@ class SpeechBufferTests(unittest.TestCase):
         b = SpeechBuffer(activity)
         self.assertEqual(b.feed(pcm(1)), [])
         sections = b.feed(pcm(.5, 0))
-        self.assertEqual(sections, [(pcm(1) + pcm(.1, 0), 'pause')])
+        self.assertEqual(sections, [(pcm(1) + pcm(.15, 0), 'pause')])
 
     def test_short_hesitation_does_not_split(self):
         b = SpeechBuffer(activity)
@@ -49,14 +49,30 @@ class SpeechBufferTests(unittest.TestCase):
         self.assertEqual(b.pcm.size, PAUSE_SAMPLES)
         self.assertEqual(b.feed(pcm(1)), [])
         output = b.feed(pcm(.5, 0))[0][0]
-        self.assertEqual(output, pcm(.5, 0) + pcm(1) + pcm(.1, 0))
+        self.assertEqual(output, pcm(.25, 0) + pcm(1) + pcm(.15, 0))
 
     def test_boundary_preserves_next_utterance(self):
         b = SpeechBuffer(activity)
         output = b.feed(pcm(1) + pcm(.6, 0) + pcm(.5, 3000))
-        self.assertEqual(output[0][0], pcm(1) + pcm(.1, 0))
+        self.assertEqual(output[0][0], pcm(1) + pcm(.15, 0))
         output = b.feed(pcm(.5, 0))
-        self.assertEqual(output[0][0], pcm(.5, 0) + pcm(.5, 3000) + pcm(.1, 0))
+        self.assertEqual(output[0][0], pcm(.25, 0) + pcm(.5, 3000) + pcm(.15, 0))
+
+    def test_padding_keeps_real_samples_outside_detected_speech(self):
+        # Quiet onset/tail are missed by this detector but must reach ASR.
+        def detector(audio):
+            indices = np.flatnonzero(audio > 1000 / 32768)
+            return ([dict(start=int(indices[0]), end=int(indices[-1]) + 1)]
+                    if len(indices) else [])
+        b = SpeechBuffer(detector)
+        sections = b.feed(pcm(.5, 100) + pcm(.2, 2000) + pcm(.5, 200))
+        self.assertEqual(sections, [
+            (pcm(.25, 100) + pcm(.2, 2000) + pcm(.15, 200), 'pause')])
+
+    def test_padding_clamps_to_available_history(self):
+        b = SpeechBuffer(activity)
+        self.assertEqual(b.feed(pcm(.05, 0) + pcm(.2) + pcm(.5, 0)), [
+            (pcm(.05, 0) + pcm(.2) + pcm(.15, 0), 'pause')])
 
     def test_reset_discards_old_audio(self):
         b = SpeechBuffer(activity)
