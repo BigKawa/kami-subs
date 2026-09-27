@@ -22,6 +22,36 @@ let resizeObserver = null;
 let scrollHandler = null;
 const nativeTracks = new WeakMap();
 let activeNativeTrack = null;
+let ancestorFullscreen = false;
+
+function hasFullscreen() {
+  return ancestorFullscreen || document.fullscreenElement || document.webkitFullscreenElement;
+}
+
+// An iframe made fullscreen by its parent has no fullscreenElement of its own.
+// Pass only the display state (never transcripts) across frame boundaries.
+function notifyFullscreenFrames() {
+  const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  for (const frame of document.querySelectorAll('iframe')) {
+    frame.contentWindow?.postMessage({
+      type: 'kami:fullscreen-state',
+      active: fullscreen === frame || (ancestorFullscreen && !fullscreen),
+    }, '*');
+  }
+}
+
+window.addEventListener('message', (event) => {
+  if (isSubframe && event.source === window.parent && event.data?.type === 'kami:fullscreen-state') {
+    const active = event.data.active === true;
+    if (active === ancestorFullscreen) return;
+    ancestorFullscreen = active;
+    relocateForFullscreen();
+  } else if (event.data?.type === 'kami:fullscreen-ready' &&
+      Array.from(document.querySelectorAll('iframe')).some(frame => frame.contentWindow === event.source)) {
+    notifyFullscreenFrames();
+  }
+});
+if (isSubframe) window.parent.postMessage({ type: 'kami:fullscreen-ready' }, '*');
 
 function clearNativeSubtitle() {
   if (!activeNativeTrack) return;
@@ -116,16 +146,17 @@ function ensureOverlay(settings) {
 }
 
 function relocateForFullscreen() {
+  notifyFullscreenFrames();
   if (isSubframe) {
-    const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
-    if (!fullscreen) {
+    if (!hasFullscreen()) {
       clearNativeSubtitle();
       if (overlayEl) overlayEl.classList.remove('kami-visible');
       return;
     }
     if (!captureMounted) return;
     ensureOverlay(lastSettings);
-    if (Date.now() - latestTextAt < CLEAR_AFTER_MS) setText(latestText);
+    const remaining = CLEAR_AFTER_MS - (Date.now() - latestTextAt);
+    if (remaining > 0) setText(latestText, remaining);
   }
   if (!overlayEl) return;
   syncOverlayLayer();
@@ -189,7 +220,8 @@ function mount(settings) {
   lastSettings = settings || {};
   // Only the main frame draws ordinary subtitles; embedded frames draw them
   // when their own player enters fullscreen, avoiding duplicate overlays.
-  if (isSubframe && !document.fullscreenElement && !document.webkitFullscreenElement) return;
+  notifyFullscreenFrames();
+  if (isSubframe && !hasFullscreen()) return;
   ensureOverlay(lastSettings);
   trackVideo();
   // Don't reveal the overlay until we actually have text — otherwise the user
@@ -209,10 +241,10 @@ function unmount() {
   textEl = null;
 }
 
-function setText(text) {
+function setText(text, remaining = CLEAR_AFTER_MS) {
   latestText = text || '';
-  latestTextAt = Date.now();
-  if (isSubframe && (!captureMounted || (!document.fullscreenElement && !document.webkitFullscreenElement))) return;
+  latestTextAt = Date.now() - (CLEAR_AFTER_MS - remaining);
+  if (isSubframe && (!captureMounted || !hasFullscreen())) return;
   if (!overlayEl) ensureOverlay(lastSettings);
   let t = (text || '').trim();
   if (!t) {
@@ -237,11 +269,11 @@ function setText(text) {
       clearNativeSubtitle();
     }
     hideTimer = null;
-  }, CLEAR_AFTER_MS);
+  }, remaining);
 }
 
 function showError(msg) {
-  if (isSubframe && (!captureMounted || (!document.fullscreenElement && !document.webkitFullscreenElement))) return;
+  if (isSubframe && (!captureMounted || !hasFullscreen())) return;
   if (!overlayEl) ensureOverlay(lastSettings);
   textEl.textContent = '⚠ ' + msg;
   updateNativeSubtitle(textEl.textContent);

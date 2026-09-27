@@ -44,13 +44,27 @@ const path = require('node:path');
     return {top:hit===el||el.contains(hit),fits:r.width>0&&r.y>=0&&r.bottom<=innerHeight,dir:getComputedStyle(el).direction};
    });assert.equal(state.top,true,JSON.stringify(state));assert.equal(state.fits,true);assert.equal(state.dir,'ltr');
   }
+  async function visible(frame=page){
+   await frame.waitForFunction(()=>{
+    const el=document.querySelector('#kami-subs-overlay');if(!el)return false;
+    const r=el.getBoundingClientRect(),s=getComputedStyle(el);
+    return el.textContent==='English subtitles above the fullscreen video.'&&s.visibility==='visible'&&Number(s.opacity)>0.99&&r.width>0&&r.y>=0&&r.bottom<=innerHeight&&r.x>=0&&r.right<=innerWidth;
+   });
+  }
+  await visible();console.log('PASS normal video: visible caption inside viewport');
+  for(const size of [{width:1920,height:1080},{width:800,height:450},{width:1280,height:720}]){
+   await page.setViewportSize(size);await visible();
+  }
+  console.log('PASS resize: 1920x1080, 800x450, 1280x720');
   await page.click('#videoFull');await nativeShown(page);
   await page.evaluate(()=>document.exitFullscreen());await page.waitForFunction(()=>!document.fullscreenElement);
+  await page.waitForFunction(()=>Array.from(document.querySelector('video').textTracks).find(t=>t.label==='Kami Subs').mode==='disabled');
   assert.equal(await page.evaluate(()=>Array.from(document.querySelector('video').textTracks).find(t=>t.label==='Kami Subs').mode),'disabled');
   console.log('PASS native video fullscreen: active native subtitle, cleanup on exit');
   await broadcast('overlay:text',{text:caption});
   await page.click('#containerFull');await overlayOnTop();
   await page.evaluate(()=>document.exitFullscreen());await page.waitForFunction(()=>!document.fullscreenElement);
+  await visible();
   console.log('PASS container fullscreen: DOM overlay in front, position, direction, exit');
   await broadcast('overlay:text',{text:caption});
   await embedded.click('#inside');await nativeShown(embedded);
@@ -65,5 +79,14 @@ const path = require('node:path');
   await page.evaluate(()=>document.exitFullscreen());await page.waitForFunction(()=>!document.fullscreenElement);
   await page.waitForFunction(()=>getComputedStyle(document.querySelector('#kami-subs-overlay')).visibility==='visible');
   console.log('PASS remount while fullscreen, top cue, track reuse, normal overlay restored');
+  await broadcast('overlay:text',{text:caption});
+  await page.evaluate(()=>{const b=document.createElement('button');b.id='iframeFull';b.textContent='Iframe fullscreen';b.onclick=()=>document.querySelector('#embedded').requestFullscreen();document.body.prepend(b)});
+  await page.click('#iframeFull');await visible(embedded);
+  assert.equal(await embedded.evaluate(()=>document.fullscreenElement),null);
+  await page.waitForFunction(()=>getComputedStyle(document.querySelector('#kami-subs-overlay')).visibility==='hidden');
+  await page.setViewportSize({width:1600,height:900});await visible(embedded);
+  await page.evaluate(()=>document.exitFullscreen());await visible();
+  await embedded.waitForFunction(()=>!document.querySelector('#kami-subs-overlay').classList.contains('kami-visible'));
+  console.log('PASS iframe element fullscreen: caption delegation, resize, no duplicates, exit');
  } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
