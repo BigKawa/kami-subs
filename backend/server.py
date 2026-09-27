@@ -197,6 +197,16 @@ def looks_like_hallucination(text: str) -> bool:
     return any(p.search(t) for p in _HALLUCINATION_PATTERNS)
 
 
+def is_pure_ah_vocalization(text: str, language: str) -> bool:
+    """Conservative text heuristic, not an audio or emotion classifier."""
+    if language != "ja":
+        return False
+    # Only Japanese ah sounds, prolongation and punctuation. Keep words,
+    # mixed utterances and meaningful responses such as un (yes) untouched.
+    compact = re.sub(r"[\s、。，,.!！?？…・「」『』\"'（）()]+", "", text)
+    return re.fullmatch(r"[あぁアァ][あぁアァー〜～っッ]*", compact) is not None
+
+
 # ----- translation ----------------------------------------------------------
 #
 # Two backends, selected via KAMI_TRANSLATOR:
@@ -475,6 +485,13 @@ async def _handle_chunk(
     if looks_like_hallucination(raw):
         # Skip the hallucinated fragment; keep the current line on screen.
         log.info("chunk #%d: hallucination filter dropped raw=%r", cid, raw)
+        return
+
+    # Avoid a translator inventing words from standalone ah sounds. Do not
+    # change transcription-only sessions or Whisper's own translation mode.
+    if (session.task == "translate" and TRANSLATOR in ("google", "nllb")
+            and is_pure_ah_vocalization(raw, detected)):
+        log.info("chunk #%d: vocalization filter skipped raw=%r", cid, raw)
         return
 
     # Append this chunk to the sentence being spoken, re-translate the WHOLE
