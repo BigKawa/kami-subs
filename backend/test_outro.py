@@ -7,6 +7,18 @@ import server
 
 
 class OutroTests(unittest.IsolatedAsyncioTestCase):
+    def test_standalone_goodnight_is_suppressed(self):
+        for text in ('おやすみなさい', 'おやすみなさい。', ' おやすみなさい！ ',
+                     'おやすみなさい…', 'おやすみなさい。おやすみなさい。'):
+            with self.subTest(text=text):
+                self.assertTrue(server.looks_like_hallucination(text))
+
+    def test_goodnight_with_other_words_remains(self):
+        for text in ('おやすみなさいと彼は言った。', 'それでは、おやすみなさい。',
+                     'おやすみなさい。また明日。', 'おやすみ', 'Good night.'):
+            with self.subTest(text=text):
+                self.assertFalse(server.looks_like_hallucination(text))
+
     def test_standalone_japanese_outros(self):
         for text in ('ご視聴ありがとうございました', 'ご視聴ありがとうございました。',
                      ' ご視聴ありがとうございます！ ',

@@ -26,7 +26,8 @@ class VocalizationTests(unittest.IsolatedAsyncioTestCase):
         audio = np.full(16000, 2000, dtype=np.int16).tobytes()
         for backend in ('nllb', 'google'):
             for raw, skipped in (('あ!あ!あ!', True), ('あ、助けて！', False),
-                                 ('おやすみなさい。', False)):
+                                 ('おやすみなさい。', True),
+                                 ('おやすみなさい。また明日。', False)):
                 with self.subTest(backend=backend, raw=raw):
                     session = server.Session(source_lang='ja', target_lang='en',
                                              task='translate', pause_aware=True)

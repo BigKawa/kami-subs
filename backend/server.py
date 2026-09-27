@@ -162,6 +162,9 @@ def get_model():
 # reference a website (e.g. a news clip saying "from cnn.com").
 
 _HALLUCINATION_PATTERNS = [
+    # User-requested suppression of a recurring noise transcription. This
+    # also hides genuine standalone goodnights; longer sentences remain.
+    re.compile(r"^\s*(?:おやすみなさい[。.!！?？、,…\s]*)+$"),
     # Exact Japanese outro only, optionally repeated. This is a heuristic:
     # a genuine standalone outro is also suppressed; ordinary thanks are not.
     re.compile(r"^\s*(?:ご視聴(?:ありがとうございました|ありがとうございます)[。.!！\s]*)+$"),
@@ -461,9 +464,9 @@ async def _handle_chunk(
     # initial_prompt context — exactly what causes "the last word spams
     # when the video pauses." Skip transcribe for sub-threshold chunks and
     # send empty text so the overlay clears.
-    # Speech-mode sections have already passed Silero VAD. Allow quieter
-    # speech there; retain the original gate for unclassified fixed chunks.
-    silence_rms = 0.001 if session.pause_aware else 0.005
+    # Keep this gate even after VAD: quiet non-speech sounds can pass VAD
+    # and lead Whisper to invent words. This can also suppress quiet speech.
+    silence_rms = 0.005
     if rms < silence_rms:
         log.info("chunk #%d: silence skip (rms=%.4f peak=%.3f)", cid, rms, peak)
         # A pause ends the current utterance: finalize whatever's building so it

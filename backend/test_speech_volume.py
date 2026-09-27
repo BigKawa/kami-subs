@@ -21,17 +21,27 @@ class SpeechVolumeTests(unittest.IsolatedAsyncioTestCase):
                                        audio, server.time.monotonic())
         return ws, asr, translate
 
-    async def test_quiet_vad_sections_reach_recognition_and_display(self):
-        # Approximate the previously skipped RMS levels in the user's log.
-        # Recognition is mocked: this tests routing, not real audio accuracy.
-        for amplitude in (46, 85, 95, 98, 131):
-            with self.subTest(amplitude=amplitude):
-                ws, asr, translate = await self.handle(amplitude, True)
-                asr.assert_called_once()
-                translate.assert_called_once_with('今助けてやる', 'ja', 'en')
-                ws.send_text.assert_awaited_once()
-                self.assertEqual(json.loads(ws.send_text.call_args.args[0])['text'],
-                                 "I'll help you now")
+    async def test_quiet_sections_skip_recognition_even_after_vad(self):
+        # Regression: lowering the gate let quiet sounds reach Whisper.
+        # Tests exercise routing only, not recognition of real audio.
+        for mode in (True, False):
+            for amplitude in (46, 85, 95, 98, 131, 163):
+                with self.subTest(mode=mode, amplitude=amplitude):
+                    ws, asr, translate = await self.handle(amplitude, mode)
+                    asr.assert_not_called()
+                    translate.assert_not_called()
+                    ws.send_text.assert_not_awaited()
+
+    async def test_audio_above_gate_reaches_translation_in_both_modes(self):
+        for mode in (True, False):
+            for amplitude in (164, 2000):
+                with self.subTest(mode=mode, amplitude=amplitude):
+                    ws, asr, translate = await self.handle(amplitude, mode)
+                    asr.assert_called_once()
+                    translate.assert_called_once_with('今助けてやる', 'ja', 'en')
+                    ws.send_text.assert_awaited_once()
+                    self.assertEqual(json.loads(ws.send_text.call_args.args[0])['text'],
+                                     "I'll help you now")
 
     async def test_silence_and_near_silence_still_skip_recognition(self):
         for mode in (True, False):
