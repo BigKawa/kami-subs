@@ -1,5 +1,9 @@
 #kami-subs-overlay {
   position: fixed;
+  /* Reset popover defaults; placement is controlled by content.js. */
+  inset: auto;
+  margin: 0;
+  border: 0;
   z-index: 2147483647;
   pointer-events: none;
   display: flex;
@@ -24,3 +28,8 @@
 #kami-subs-overlay.kami-visible { opacity: 1; }
 #kami-subs-overlay.kami-error { background: rgba(120, 20, 20, 0.85); }
 #kami-subs-overlay .kami-subs-text { display: inline-block; }
+
+#kami-subs-overlay::backdrop {
+  background: transparent;
+  pointer-events: none;
+}

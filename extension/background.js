@@ -43,12 +43,12 @@ async function ensureContentScript(tabId) {
   }
   try {
     await chrome.scripting.insertCSS({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ['content.css']
     });
   } catch (e) { /* ignore — may already be injected */ }
   await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     files: ['content.js']
   });
 }

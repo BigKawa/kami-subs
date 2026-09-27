@@ -162,6 +162,9 @@ def get_model():
 # reference a website (e.g. a news clip saying "from cnn.com").
 
 _HALLUCINATION_PATTERNS = [
+    # Exact Japanese outro only, optionally repeated. This is a heuristic:
+    # a genuine standalone outro is also suppressed; ordinary thanks are not.
+    re.compile(r"^\s*(?:ご視聴(?:ありがとうございました|ありがとうございます)[。.!！\s]*)+$"),
     # Arabic subtitle credits — the dominant hallucination in the user's case.
     # ترجمة (sing), ترجمات (plural), ترجم (verb), ترجمها (he translated it) —
     # all valid lead-ins to a credit. \S* covers the suffix variants.
